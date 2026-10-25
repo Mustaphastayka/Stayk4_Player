@@ -1,0 +1,10 @@
+{
+  "name": "stayk4-player-web-portal",
+  "version": "1.0.0",
+  "description": "Web Playlist Manager Portal for Stayk4_ Player",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {}
+}
