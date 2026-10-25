@@ -1,24 +1,3 @@
 {
-  "devices": {
-    "cc:a4:7a:b8:9a:5d": {
-      "mac_address": "cc:a4:7a:b8:9a:5d",
-      "device_key": "970038",
-      "is_trial": 0,
-      "expire_date": "2099-12-31",
-      "playlists": [
-        {
-          "id": "3b7f63997a4a1e4fdfff96ba",
-          "name": "aaapaa",
-          "playlist_name": "aaapaa",
-          "url": "http://operator2.barfik.org/get.php?username=f67w7n44wu78&password=rk9w93465gn7&type=m3u_plus&output=ts",
-          "type": "general",
-          "is_protected": 0
-        }
-      ],
-      "deleted_ids": [
-        "test-ghost-1",
-        "1792842224121"
-      ]
-    }
-  }
+  "devices": {}
 }

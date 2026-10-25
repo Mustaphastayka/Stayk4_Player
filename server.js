@@ -471,10 +471,10 @@ const WEB_UI_HTML = `<!DOCTYPE html>
     <p class="brand-subtitle">Enter the <b>MAC Address</b> and <b>Device Key</b> shown on your TV or app screen. Your login will be securely remembered on this device:</p>
 
     <label class="form-label">MAC Address</label>
-    <input id="macInput" class="mono-input" placeholder="e.g. cc:a4:7a:b8:9a:5d" />
+    <input id="macInput" class="mono-input" placeholder="e.g. 00:1A:79:AB:CD:EF" />
 
     <label class="form-label" style="margin-top: 4px;">Device Key (6 digits)</label>
-    <input id="keyInput" class="mono-input" placeholder="e.g. 970038" />
+    <input id="keyInput" class="mono-input" placeholder="e.g. 123456" />
 
     <button class="btn-primary" onclick="login()" style="margin-top: 6px;">Login to Device</button>
   </div>
