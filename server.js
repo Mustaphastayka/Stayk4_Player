@@ -44,25 +44,42 @@ function customDecode(payload) {
   return JSON.parse(Buffer.from(cleanB64, 'base64').toString('utf8'));
 }
 
+function getDeviceKeyForMac(mac) {
+  const clean = (mac || '').toLowerCase().replace(/[^a-f0-9]/g, '');
+  let hash = 17;
+  for (let i = 0; i < clean.length; i++) {
+    hash = (hash * 31 + clean.charCodeAt(i)) & 0x7FFFFFFF;
+  }
+  return String(100000 + (hash % 900000));
+}
+
 // Convert raw app_device_id into deterministic MAC address + 6-digit device_key
-function getOrCreateDevice(db, rawId, explicitMac) {
+function getOrCreateDevice(db, rawId, explicitMac, explicitKey) {
   let mac = explicitMac;
   if (!mac) {
     const hash = crypto.createHash('md5').update(rawId || 'default').digest('hex');
     mac = hash.match(/.{1,2}/g).slice(0, 6).join(':');
   }
   mac = mac.toLowerCase();
+  const keyToUse = (explicitKey && String(explicitKey).trim().length > 0)
+    ? String(explicitKey).trim()
+    : getDeviceKeyForMac(mac);
+
   if (!db.devices[mac]) {
-    const deviceKey = String(Math.floor(100000 + Math.random() * 900000));
     db.devices[mac] = {
       mac_address: mac,
-      device_key: deviceKey,
+      device_key: keyToUse,
       is_trial: 0, // 0 = Activated (Unlimited)
       expire_date: '2099-12-31',
       playlists: [],
       deleted_ids: []
     };
     saveDb(db);
+  } else if (explicitKey && String(explicitKey).trim().length > 0 && db.devices[mac].device_key !== String(explicitKey).trim()) {
+    if (db.devices[mac].playlists.length === 0) {
+      db.devices[mac].device_key = String(explicitKey).trim();
+      saveDb(db);
+    }
   }
   // Ensure array structure
   if (!Array.isArray(db.devices[mac].playlists)) {
@@ -113,10 +130,11 @@ const server = http.createServer((req, res) => {
 
         // 1. App Startup Handshake: POST /authenticate
         if (req.url === '/authenticate' || req.url === '/desktopRequest/authenticate') {
-          const dev = getOrCreateDevice(db, payload.app_device_id, payload.mac_address);
+          const dev = getOrCreateDevice(db, payload.app_device_id, payload.mac_address, payload.device_key);
 
-          if (payload.device_key && !dev.device_key) {
+          if (payload.device_key && dev.device_key !== payload.device_key) {
             dev.device_key = payload.device_key;
+            saveDb(db);
           }
 
           // If app sent local_playlists, only merge items that have NOT been deleted!
@@ -166,10 +184,23 @@ const server = http.createServer((req, res) => {
         if (req.url === '/web/login') {
           const mac = (payload.mac_address || '').trim().toLowerCase();
           const key = (payload.device_key || '').trim();
-          const dev = db.devices[mac];
-          if (!dev || dev.device_key !== key) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ error: 'Invalid MAC Address or Device Key' }));
+          if (!mac || !key) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'MAC address and device key are required' }));
+          }
+          let dev = db.devices[mac];
+          if (!dev) {
+            // Self-heal: If server restarted and database was reset, register device with user's key!
+            dev = getOrCreateDevice(db, null, mac, key);
+          } else if (dev.device_key !== key) {
+            // If device has no playlists or key matches deterministic key, adopt key
+            if (dev.playlists.length === 0 || key === getDeviceKeyForMac(mac)) {
+              dev.device_key = key;
+              saveDb(db);
+            } else {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'Invalid MAC Address or Device Key' }));
+            }
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify(dev));
@@ -177,10 +208,15 @@ const server = http.createServer((req, res) => {
 
         // 3. Add or Edit Playlist: POST /playlists
         if (req.url === '/playlists' || req.url === '/desktopRequest/playlists') {
-          const dev = getOrCreateDevice(db, payload.app_device_id, payload.mac_address);
+          const dev = getOrCreateDevice(db, payload.app_device_id, payload.mac_address, payload.device_key);
           if (payload.web_auth && payload.device_key !== dev.device_key) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ error: 'Unauthorized Device Key' }));
+            if (dev.playlists.length === 0) {
+              dev.device_key = payload.device_key;
+              saveDb(db);
+            } else {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'Unauthorized Device Key' }));
+            }
           }
 
           const pid = (payload.playlist_id && payload.playlist_id !== '-1')
@@ -581,7 +617,44 @@ const WEB_UI_HTML = `<!DOCTYPE html>
         localStorage.setItem('stayk4_portal_mac', currentMac);
         localStorage.setItem('stayk4_portal_key', currentKey);
 
-        const dev = await res.json();
+        let dev = await res.json();
+
+        // Self-heal: If server was reset (0 playlists) but browser has backup playlists for this device, restore them!
+        if (!dev.playlists || dev.playlists.length === 0) {
+          const backup = localStorage.getItem('stayk4_backup_playlists_' + currentMac);
+          if (backup) {
+            try {
+              const cachedList = JSON.parse(backup);
+              if (Array.isArray(cachedList) && cachedList.length > 0) {
+                for (const p of cachedList) {
+                  await fetch('/playlists', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      web_auth: true,
+                      mac_address: currentMac,
+                      device_key: currentKey,
+                      playlist_id: p.id || '-1',
+                      playlist_name: p.name || p.playlist_name || 'My Playlist',
+                      playlist_url: p.url,
+                      playlist_type: p.type || 'general',
+                      is_protected: (p.is_protected == 1 || p.isProtected === true) ? 1 : 0
+                    })
+                  });
+                }
+                const refreshRes = await fetch('/web/login', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ mac_address: currentMac, device_key: currentKey })
+                });
+                if (refreshRes.ok) {
+                  dev = await refreshRes.json();
+                }
+              }
+            } catch (_) {}
+          }
+        }
+
         document.getElementById('loginCard').style.display = 'none';
         document.getElementById('managerCard').style.display = 'block';
         document.getElementById('macLabel').textContent = dev.mac_address;
@@ -626,6 +699,9 @@ const WEB_UI_HTML = `<!DOCTYPE html>
     }, 3000);
 
     function renderPlaylists(list) {
+      if (list && list.length > 0 && currentMac) {
+        localStorage.setItem('stayk4_backup_playlists_' + currentMac, JSON.stringify(list));
+      }
       const container = document.getElementById('playlistList');
       if (!list || !list.length) {
         container.innerHTML = '<p style="color:#9CA3AF; padding: 14px 0; font-size: 13.5px;">No playlists added yet. Add your M3U or Xtream Codes playlist below!</p>';
@@ -720,6 +796,15 @@ const WEB_UI_HTML = `<!DOCTYPE html>
 
     async function deletePlaylist(id) {
       if (!confirm('Are you sure you want to delete this playlist?')) return;
+      if (currentMac) {
+        const backup = localStorage.getItem('stayk4_backup_playlists_' + currentMac);
+        if (backup) {
+          try {
+            const cachedList = JSON.parse(backup).filter(p => p.id !== id);
+            localStorage.setItem('stayk4_backup_playlists_' + currentMac, JSON.stringify(cachedList));
+          } catch (_) {}
+        }
+      }
       const res = await fetch('/playlists/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
